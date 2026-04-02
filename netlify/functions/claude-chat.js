@@ -1,123 +1,85 @@
 const BRIDGE = "https://dilettaromana-unicallmapper.hf.space/api/gpt/bridge";
 
-// Pre-fetch la struttura Drive prima di chiamare Claude
-async function prefetchDriveStructure() {
-  try {
-    // 1. Lista cartelle root
-    const rootResp = await fetch(`${BRIDGE}?action=list_folders`);
-    const rootData = await rootResp.json();
-    const folders = rootData.subfolders || [];
-    // Prendi la cartella datata piu' recente
-    const dated = folders.filter(f => /^\d{4}-\d{2}-\d{2}$/.test(f.name)).sort((a,b) => b.name.localeCompare(a.name))[0];
-    if (!dated) return { error: "Nessuna cartella datata trovata" };
+// FILE IDs HARDCODED (aggiornati: 2026-03-31) — Aggiornali dopo ogni nuova pipeline
+const FILES = {
+  // FASE 1 — profili/gpt/
+  authors_profiles: { id: "1rMjlkqDCBAPgokEUaJ3xsT_W9e9wSUs5", name: "gpt_authors_profiles", kb: 83 },
+  cosine_detail: { id: "1H6KcQ1nQq9uXIefpXZbRQW-aM2NeTVg_", name: "gpt_cosine_detail", kb: 294 },
+  author_vocabularies: { id: "1QplgwBnGgrZoIYz4hZsdipFryLAVhNGU", name: "gpt_author_vocabularies", kb: 875 },
+  cosine_profiles: { id: "1v5OEWpn6XnaVlWNJAl1poHD-rG7iWjdk", name: "gpt_cosine_profiles", kb: 121 },
+  publications_mapped: { id: "10ux02-MXsCc4_2AjxG93h_43pRqJfjB1", name: "gpt_publications_mapped", kb: 863 },
+  cluster_summary: { id: "1w947enynW2nSlbNYejsCJzFyy7pBC4EU", name: "gpt_cluster_summary", kb: 0 },
+  dept_cluster: { id: "1tBPriVOudDYJrhDEr5isbFlXyZufO2a6", name: "gpt_dept_cluster", kb: 1 },
+  cosine_summary: { id: "1bGp8LWn60hKL7Ke4S_C7AIQg_yRGC9VD", name: "gpt_cosine_summary", kb: 1 },
+  // FASE 3 — gpt/
+  calls_bitfidf: { id: "1Q72KcP6DrJlBwsm3_4gaYnM0RgY3LwV2", name: "gpt_calls_bitfidf", kb: 4429 },
+  calls_vocab: { id: "1Irs3GLrvB8aExwW54_qYn3fRlDysAwfV", name: "gpt_calls_vocab", kb: 4366 },
+  calls_cluster: { id: "1Onq8rc4__s8gVnQYI0sHTtbciAcDM3en", name: "gpt_calls_cluster", kb: 1013 },
+  calls_mapped: { id: "1g6RBc_yLAGzDw4JjeCMd24PsTEqVdPIR", name: "gpt_calls_mapped", kb: 131 },
+  call_vocabularies: { id: "1nKu-pBt40alLwCBraelUoykl_0HAS4XQ", name: "gpt_call_vocabularies", kb: 596 },
+  summary: { id: "1h4uXomlkTmCVBDjmz4eSW_mWj2E1cdfS", name: "gpt_summary", kb: 4 },
+  calls_unmapped: { id: "14g4yfQHgQjKjT2qG-aoKvmqCK7kkQ7Fp", name: "gpt_calls_unmapped", kb: 23 },
+};
 
-    // 2. Sotto-cartelle della datata
-    const subResp = await fetch(`${BRIDGE}?action=list_folders&folder_id=${dated.id}`);
-    const subData = await subResp.json();
-    const subs = subData.subfolders || [];
-    const profiliFolder = subs.find(f => f.name === "profili");
-    const gptRootFolder = subs.find(f => f.name === "gpt");
+// Build file list for system prompt
+const fileListStr = Object.entries(FILES).map(([k,v]) => `${v.name}: file_id="${v.id}" (${v.kb}KB)`).join("\n");
 
-    // 3. profili/gpt/
-    let profiliGptFiles = [];
-    if (profiliFolder) {
-      const pgResp = await fetch(`${BRIDGE}?action=list_folders&folder_id=${profiliFolder.id}`);
-      const pgData = await pgResp.json();
-      const gptInProfili = (pgData.subfolders || []).find(f => f.name === "gpt");
-      if (gptInProfili) {
-        const filesResp = await fetch(`${BRIDGE}?action=list&folder_id=${gptInProfili.id}&max=50`);
-        const filesData = await filesResp.json();
-        profiliGptFiles = (filesData.files || []).map(f => ({ name: f.name, id: f.id, size: f.size_bytes }));
-      }
-    }
+const SYSTEM_PROMPT = `Sei UNICAM Research Analyst (Claude Edition). Rispondi SEMPRE in italiano.
 
-    // 4. gpt/ (root)
-    let gptRootFiles = [];
-    if (gptRootFolder) {
-      const filesResp = await fetch(`${BRIDGE}?action=list&folder_id=${gptRootFolder.id}&max=50`);
-      const filesData = await filesResp.json();
-      gptRootFiles = (filesData.files || []).map(f => ({ name: f.name, id: f.id, size: f.size_bytes }));
-    }
+=== FILE DISPONIBILI (usa drive_read_file con questi file_id) ===
+${fileListStr}
 
-    return { dated: dated.name, profiliGptFiles, gptRootFiles };
-  } catch(e) {
-    return { error: e.message };
-  }
-}
-
-function buildSystemPrompt(driveInfo) {
-  let fileList = "";
-  if (driveInfo.error) {
-    fileList = `ERRORE accesso Drive: ${driveInfo.error}. Rispondi comunque con le informazioni che hai.`;
-  } else {
-    fileList = `CARTELLA DATATA: ${driveInfo.dated}\n\nFILE CSV FASE 1 (profili/gpt/):\n`;
-    for (const f of driveInfo.profiliGptFiles) {
-      fileList += `- ${f.name} → file_id="${f.id}" (${Math.round(f.size/1024)}KB)\n`;
-    }
-    fileList += `\nFILE CSV FASE 3 (gpt/):\n`;
-    for (const f of driveInfo.gptRootFiles) {
-      fileList += `- ${f.name} → file_id="${f.id}" (${Math.round(f.size/1024)}KB)\n`;
-    }
-    fileList += `\nUSA DIRETTAMENTE drive_read_file con il file_id mostrato sopra. NON serve navigare le cartelle.`;
-  }
-
-  return `Sei UNICAM Research Analyst (Claude Edition), analista di ricerca dell'Universita' di Camerino. Rispondi SEMPRE in italiano.
-
-=== FILE GIA' DISPONIBILI SU GOOGLE DRIVE ===
-${fileList}
-
-Per file grandi (>300KB) usa il parametro department per filtrare (es: "Scuola di Scienze e Tecnologie").
-Chiama drive_read_file(file_id, max_chars, department) DIRETTAMENTE con il file_id dalla lista sopra.
+Per file >300KB usa department="Scuola di ..." per filtrare server-side.
+Esempio: drive_read_file(file_id="...", max_chars=200000, department="Scuola di Architettura e Design")
 
 === ATENEO ===
-P1 (Ambiente Territorio): C1.1=Green Deal Ambiente | C1.2=Infrastrutture Territorio Patrimonio
-P2 (Salute Biotec): C2.1=Salute Alimentazione | C2.2=Biotecnologie Farmaceutica
-P3 (Digitale Societa'): C3.1=Societa' Inclusiva Cultura | C3.2=Digitale Dati Tecnologie
+P1: C1.1=Green Deal Ambiente | C1.2=Infrastrutture Territorio Patrimonio
+P2: C2.1=Salute Alimentazione | C2.2=Biotecnologie Farmaceutica
+P3: C3.1=Societa' Inclusiva Cultura | C3.2=Digitale Dati Tecnologie
 5 Scuole: Scienze e Tecnologie, Bioscienze e Medicina Veterinaria, Scienze del Farmaco, Architettura e Design, Giurisprudenza.
 
 === ALGORITMI E SOGLIE ===
-METODO A (Softmax): PCT_C1.1...PCT_C3.2. METODO B (Cosine BiTFIDF): cosine_profiles/detail.
-Concordano=ROBUSTO. Discordano=INTERDISCIPLINARE.
+Metodo A (Softmax→PCT). Metodo B (Cosine BiTFIDF). Concordano=ROBUSTO, Discordano=INTERDISCIPLINARE.
 Matching: BiTFIDF(3)>Vocabolario(2)>Cluster(1).
 COSINE: >=0.05 SOLIDO, >=0.08 eccellente. RANK: <=3 TOP, <=10 shortlist.
 PCT: >=40% focalizzato, <25% disperso. PUBS>=3 affidabile. DAYS<30 URGENTE.
 
-=== CSV COLONNE ===
+=== COLONNE CSV ===
 authors_profiles: RM_PERSON_ID,LAST_NAME,FIRST_NAME,DEPARTMENT,FASCIA,SSD_2015,SSD_NOME,TOTAL_PUBS,DOMINANT_CLUSTER_WEIGHTED,DOMINANT_CLUSTER_PCT_W,IS_FOCUSED,PCT_C1.1...PCT_C3.2
-cosine_detail: RM_PERSON_ID,LAST_NAME,FIRST_NAME,SSD_2015,TOTAL_PUBS,N_TERMINI,COSINE_C1.1...C3.2,SHARED_C1.1...C3.2,TOP_TERMS_C1.1...TOP_TERMS_C3.2
+cosine_detail: RM_PERSON_ID,LAST_NAME,SSD_2015,TOTAL_PUBS,N_TERMINI,COSINE_C1.1...C3.2,TOP_TERMS_C1.1...TOP_TERMS_C3.2
 author_vocabularies: RM_PERSON_ID,LAST_NAME,FIRST_NAME,DEPARTMENT,N_TERMS,TOP_TERMS,VOCABULARY
-calls_bitfidf: CALL_IDENTIFIER,RM_PERSON_ID,LAST_NAME,FIRST_NAME,DEPARTMENT,COSINE_SCORE,SHARED_TERMS_N,PRECISION,RANK,TOP_SHARED_TERMS
+calls_bitfidf: CALL_IDENTIFIER,RM_PERSON_ID,LAST_NAME,DEPARTMENT,COSINE_SCORE,SHARED_TERMS_N,RANK,TOP_SHARED_TERMS
 calls_mapped: CALL_IDENTIFIER,TITLE,CALL_STATUS,DEADLINE,DAYS_TO_DEADLINE,PRIMARY_CLUSTER,BUDGET_TOPIC,ACTION_TYPE
 dept_cluster: DEPARTMENT,DOMINANT_CLUSTER_WEIGHTED,N
-cluster_summary: DOMINANT_CLUSTER_WEIGHTED,N_AUTHORS,AVG_PUBS,AVG_FOCUS
 
-=== PROCEDURE QUERY ===
-1. Chi lavora su [tema]? → author_vocabularies (TOP_TERMS) + join authors_profiles
-2. Profilo [ricercatore] → authors_profiles + cosine_profiles (concordanza) + calls_bitfidf (top call)
+=== PROCEDURE ===
+1. Chi lavora su [tema]? → author_vocabularies(TOP_TERMS) + authors_profiles
+2. Profilo [nome] → authors_profiles + cosine_profiles + calls_bitfidf(top call)
 3. Analisi Scuola → dept_cluster + cluster_summary
-4. Call attive → calls_mapped (CALL_STATUS=open)
-5. Scadenza 30gg → calls_mapped (DAYS<30) + calls_bitfidf (candidati)
-6. Dettaglio call → calls_mapped + call_vocabularies + calls_bitfidf
-7. Call per [ricercatore] → calls_bitfidf (LAST_NAME, COSINE desc)
-8. Chi per call [id] → calls_bitfidf (CALL_IDENTIFIER, RANK asc)
-9. Confronto metodi → bitfidf+vocab+cluster per stessa call
-10. Gap → call per cluster vs autori per cluster
-11. Dispersi → IS_FOCUSED=False AND PCT<25%
-12. Scuole deboli → dept_cluster
-13. Matrice azione → calls_mapped DAYS<60 x candidati
+4-6. Call → calls_mapped
+7. Call per [nome] → calls_bitfidf(LAST_NAME, COSINE desc)
+8. Chi per call → calls_bitfidf(CALL_IDENTIFIER, RANK asc)
+10. Gap → cluster_summary vs calls_mapped
 19. Report: Panoramica→Copertura→Urgenze→Gap→Azioni
-23-24. Divulgativi: MAI nomi, MAI codici (C1.1/P1), 200+ parole, word cloud
+23-24. Divulgativi: MAI nomi, MAI codici, 200+ parole
 
 === REGOLE ===
-- NON inventare dati. Cita file, colonna, valore.
-- Per match: SEMPRE cosine, rank, TOP_SHARED_TERMS.
-- Chiudi con AZIONI SUGGERITE.
-- Alla prima interazione mostra il menu 24 query.`;
-}
+NON inventare dati. Cita file+colonna. Chiudi con AZIONI SUGGERITE.
+Alla prima interazione mostra il menu 24 query.`;
 
-const TOOLS = [
-  { name: "drive_read_file", description: "Legge CSV da Drive. Usa department per filtrare file grandi per Scuola.", input_schema: { type: "object", properties: { file_id: { type: "string", description: "ID del file (dalla lista nel system prompt)" }, max_chars: { type: "integer", default: 100000, description: "Max caratteri. 500000 per file grandi." }, department: { type: "string", description: "Filtra per Scuola, es: Scuola di Scienze e Tecnologie" } }, required: ["file_id"] } }
-];
+const TOOLS = [{
+  name: "drive_read_file",
+  description: "Legge un CSV da Google Drive. Usa i file_id dal system prompt. Per file grandi aggiungi department per filtrare.",
+  input_schema: {
+    type: "object",
+    properties: {
+      file_id: { type: "string", description: "ID file dalla lista nel system prompt" },
+      max_chars: { type: "integer", default: 100000 },
+      department: { type: "string", description: "Filtra per Scuola (riduce file grandi)" }
+    },
+    required: ["file_id"]
+  }
+}];
 
 async function readFile(input) {
   const url = new URL(BRIDGE);
@@ -127,54 +89,45 @@ async function readFile(input) {
   if (input.department) url.searchParams.set("department", input.department);
   const resp = await fetch(url.toString());
   const text = await resp.text();
-  return text.length > 400000 ? text.substring(0, 400000) + "\n...[TRONCATO]" : text;
+  return text.length > 300000 ? text.substring(0, 300000) + "\n[TRONCATO]" : text;
 }
 
-export default async (req, context) => {
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" } });
-  if (req.method !== "POST") return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405 });
+export default async (req) => {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type" } });
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
   const KEY = Netlify.env.get("ANTHROPIC_API_KEY");
-  if (!KEY) return new Response(JSON.stringify({ error: "ANTHROPIC_API_KEY non configurata" }), { status: 500, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+  if (!KEY) return new Response(JSON.stringify({ error: "API key mancante" }), { status: 500, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
 
   try {
-    const body = await req.json();
-    let messages = body.messages || [];
+    const { messages = [] } = await req.json();
+    let msgs = [...messages];
+    let result;
 
-    // Pre-fetch Drive structure (cached per request)
-    const driveInfo = body._driveInfo || await prefetchDriveStructure();
-    const systemPrompt = buildSystemPrompt(driveInfo);
-
-    // Agentic loop (max 4 iterations - reduced from 12)
-    let finalResponse = null;
-    for (let i = 0; i < 4; i++) {
-      const apiResp = await fetch("https://api.anthropic.com/v1/messages", {
+    for (let i = 0; i < 3; i++) {
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": KEY, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 8192, system: systemPrompt, tools: TOOLS, messages })
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 8192, system: SYSTEM_PROMPT, tools: TOOLS, messages: msgs })
       });
-      if (!apiResp.ok) {
-        const err = await apiResp.text();
-        return new Response(JSON.stringify({ error: "API " + apiResp.status, details: err.substring(0, 500) }), { status: apiResp.status, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
-      }
-      const result = await apiResp.json();
+      if (!r.ok) return new Response(JSON.stringify({ error: `API ${r.status}`, details: (await r.text()).substring(0,300) }), { status: r.status, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+      
+      result = await r.json();
+      if (result.stop_reason !== "tool_use") break;
 
-      if (result.stop_reason === "tool_use") {
-        messages.push({ role: "assistant", content: result.content });
-        const toolResults = [];
-        for (const block of result.content) {
-          if (block.type === "tool_use") {
-            try { toolResults.push({ type: "tool_result", tool_use_id: block.id, content: await readFile(block.input) }); }
-            catch (e) { toolResults.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify({ error: e.message }), is_error: true }); }
-          }
+      msgs.push({ role: "assistant", content: result.content });
+      const tr = [];
+      for (const b of result.content) {
+        if (b.type === "tool_use") {
+          try { tr.push({ type: "tool_result", tool_use_id: b.id, content: await readFile(b.input) }); }
+          catch (e) { tr.push({ type: "tool_result", tool_use_id: b.id, content: `{"error":"${e.message}"}`, is_error: true }); }
         }
-        messages.push({ role: "user", content: toolResults });
-      } else { finalResponse = result; break; }
+      }
+      msgs.push({ role: "user", content: tr });
     }
 
-    if (!finalResponse) finalResponse = { content: [{ type: "text", text: "Analisi complessa: riprova con una domanda piu' specifica." }] };
-    const text = finalResponse.content.filter(b => b.type === "text").map(b => b.text).join("\n");
-    return new Response(JSON.stringify({ response: text, usage: finalResponse.usage, model: finalResponse.model, driveInfo }), {
+    const text = (result?.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
+    return new Response(JSON.stringify({ response: text, usage: result?.usage, model: result?.model }), {
       status: 200, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
     });
   } catch (e) {
