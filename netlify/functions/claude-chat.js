@@ -52,16 +52,23 @@ calls_bitfidf: CALL_IDENTIFIER,RM_PERSON_ID,LAST_NAME,DEPARTMENT,COSINE_SCORE,SH
 calls_mapped: CALL_IDENTIFIER,TITLE,CALL_STATUS,DEADLINE,DAYS_TO_DEADLINE,PRIMARY_CLUSTER,BUDGET_TOPIC,ACTION_TYPE
 dept_cluster: DEPARTMENT,DOMINANT_CLUSTER_WEIGHTED,N
 
-=== PROCEDURE ===
-1. Chi lavora su [tema]? → author_vocabularies(TOP_TERMS) + authors_profiles
-2. Profilo [nome] → authors_profiles + cosine_profiles + calls_bitfidf(top call)
-3. Analisi Scuola → dept_cluster + cluster_summary
-4-6. Call → calls_mapped
-7. Call per [nome] → calls_bitfidf(LAST_NAME, COSINE desc)
-8. Chi per call → calls_bitfidf(CALL_IDENTIFIER, RANK asc)
-10. Gap → cluster_summary vs calls_mapped
-19. Report: Panoramica→Copertura→Urgenze→Gap→Azioni
-23-24. Divulgativi: MAI nomi, MAI codici, 200+ parole
+=== REGOLA CRITICA: MASSIMO 1-2 FILE PER RISPOSTA ===
+Per evitare timeout, leggi MASSIMO 1-2 file per query. NON leggere 3+ file.
+NON leggere author_vocabularies (875KB, troppo grande). Usa cosine_detail che ha gia' TOP_TERMS per cluster.
+NON leggere calls_vocab o calls_cluster (enormi). Usa calls_bitfidf per i match.
+Per un profilo ricercatore: leggi SOLO authors_profiles (ha tutto: cluster, PCT, IS_FOCUSED, TOTAL_PUBS).
+Se l'utente chiede i termini/vocabolario: leggi cosine_detail con department= per filtrare.
+
+=== PROCEDURE (OTTIMIZZATE - 1 FILE CIASCUNA) ===
+1. Chi lavora su [tema]? → cosine_detail (cerca tema in TOP_TERMS, usa department= se serve)
+2. Profilo [nome] → authors_profiles (LAST_NAME, DEPARTMENT, FASCIA, PCT, IS_FOCUSED, TOTAL_PUBS — tutto in 1 file!)
+3. Analisi Scuola → dept_cluster (piccolo, 1KB)
+4-6. Call → calls_mapped (131KB)
+7. Call per [nome] → calls_bitfidf con department=Scuola (filtra per ridurre)
+8. Chi per call → calls_mapped (cerca CALL_IDENTIFIER, poi calls_bitfidf se serve team)
+10. Gap → cluster_summary (piccolo)
+19. Report → summary + cluster_summary (entrambi piccoli)
+23-24. Divulgativi → cosine_detail con department=
 
 === REGOLE ===
 NON inventare dati. Cita file+colonna. Chiudi con AZIONI SUGGERITE.
@@ -74,7 +81,7 @@ const TOOLS = [{
     type: "object",
     properties: {
       file_id: { type: "string", description: "ID file dalla lista nel system prompt" },
-      max_chars: { type: "integer", default: 100000 },
+      max_chars: { type: "integer", default: 80000 },
       department: { type: "string", description: "Filtra per Scuola (riduce file grandi)" }
     },
     required: ["file_id"]
@@ -85,11 +92,11 @@ async function readFile(input) {
   const url = new URL(BRIDGE);
   url.searchParams.set("action", "read");
   url.searchParams.set("file_id", input.file_id);
-  url.searchParams.set("max_chars", String(input.max_chars || 100000));
+  url.searchParams.set("max_chars", String(input.max_chars || 80000));
   if (input.department) url.searchParams.set("department", input.department);
   const resp = await fetch(url.toString());
   const text = await resp.text();
-  return text.length > 300000 ? text.substring(0, 300000) + "\n[TRONCATO]" : text;
+  return text.length > 200000 ? text.substring(0, 200000) + "\n[TRONCATO]" : text;
 }
 
 export default async (req) => {
@@ -104,7 +111,7 @@ export default async (req) => {
     let msgs = [...messages];
     let result;
 
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 4; i++) {
       const r = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": KEY, "anthropic-version": "2023-06-01" },
