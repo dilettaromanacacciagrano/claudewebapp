@@ -15,12 +15,13 @@ const F = {
   author_vocabularies: "1QplgwBnGgrZoIYz4hZsdipFryLAVhNGU",// 875KB
 };
 
-async function readBridge(fileId, maxChars, department) {
+async function readBridge(fileId, maxChars, department, name) {
   const url = new URL(BRIDGE);
   url.searchParams.set("action", "read");
   url.searchParams.set("file_id", fileId);
   url.searchParams.set("max_chars", String(maxChars || 90000));
   if (department) url.searchParams.set("department", department);
+  if (name) url.searchParams.set("name", name);
   const r = await fetch(url.toString());
   if (!r.ok) return `{errore: "Bridge HTTP ${r.status}"}`;
   const text = await r.text();
@@ -30,20 +31,44 @@ async function readBridge(fileId, maxChars, department) {
   } catch { return text.substring(0, 150000); }
 }
 
+// Estrae cognome dalla query
+function extractName(query) {
+  const m = query.match(/(?:di|per|su|mappato)\s+(\w+)\s+(\w+)/i)
+    || query.match(/(?:di|per|su|mappato)\s+(\w+)/i)
+    || query.match(/profilo\s+(?:esteso\s+)?(?:di\s+)?(\w+)\s+(\w+)/i);
+  if (m) return (m[2] || m[1]).toUpperCase();
+  return null;
+}
+
 // Decide quali file pre-leggere in base alla query
 function selectFiles(query) {
   const q = query.toLowerCase();
+  const name = extractName(query);
 
-  // Profilo singolo ricercatore
-  if (q.match(/profilo|chi e'|chi è|scheda|competenz.*di\s/)) {
-    return [{ id: F.profiles, max: 90000, label: "gpt_authors_profiles" }];
+  // Call per ricercatore specifico (nome + menzione call/mappato)
+  if (name && q.match(/call|mappat|associat|match|candidat/)) {
+    return [
+      { id: F.profiles, max: 90000, label: "gpt_authors_profiles", name },
+      { id: F.calls_bitfidf, max: 200000, label: "gpt_calls_bitfidf", name },
+    ];
+  }
+  // Profilo singolo ricercatore (nome presente)
+  if (name && q.match(/profilo|scheda|competenz|chi e|chi è/)) {
+    return [
+      { id: F.profiles, max: 90000, label: "gpt_authors_profiles", name },
+      { id: F.calls_bitfidf, max: 200000, label: "gpt_calls_bitfidf", name },
+    ];
   }
   // Chi lavora su tema
   if (q.match(/chi lavora|chi si occupa|esperti|ricercat.*su\s|tema/)) {
     return [{ id: F.profiles, max: 90000, label: "gpt_authors_profiles" }];
   }
-  // Call per ricercatore o chi per call (file grande, serve department)
-  if (q.match(/call per |quali call|call.*scad|urgenti|deadline|scadenza/)) {
+  // Call in scadenza / panoramica call
+  if (q.match(/call.*scad|urgenti|deadline|scadenza|call attive|panoramica call/)) {
+    return [{ id: F.calls_mapped, max: 140000, label: "gpt_calls_mapped" }];
+  }
+  // Chi per call specifica
+  if (q.match(/chi per call|team per|candidati per/)) {
     return [{ id: F.calls_mapped, max: 140000, label: "gpt_calls_mapped" }];
   }
   // Gap analysis
@@ -76,7 +101,7 @@ function selectFiles(query) {
   if (q.match(/menu|ciao|help|aiuto|analisi disponibili/)) {
     return [];
   }
-  // Default: profili autori (copre la maggior parte dei casi)
+  // Default
   return [{ id: F.profiles, max: 90000, label: "gpt_authors_profiles" }];
 }
 
@@ -93,6 +118,7 @@ Gerarchia matching: BiTFIDF>Vocabolario>Cluster.
 COLONNE:
 profiles: RM_PERSON_ID,LAST_NAME,FIRST_NAME,DEPARTMENT,FASCIA,SSD_2015,SSD_NOME,TOTAL_PUBS,DOMINANT_CLUSTER_WEIGHTED,DOMINANT_CLUSTER_PCT_W,IS_FOCUSED,PCT_C1.1...PCT_C3.2
 calls_mapped: CALL_IDENTIFIER,TITLE,CALL_STATUS,DEADLINE,DAYS_TO_DEADLINE,PRIMARY_CLUSTER,BUDGET_TOPIC,ACTION_TYPE
+calls_bitfidf: CALL_IDENTIFIER,RM_PERSON_ID,LAST_NAME,FIRST_NAME,DEPARTMENT,SSD_2015,COSINE_SCORE,SHARED_TERMS_N,PRECISION,RANK,TOP_SHARED_TERMS (COSINE>=0.05=solido, RANK<=10=shortlist)
 dept_cluster: DEPARTMENT,DOMINANT_CLUSTER_WEIGHTED,N
 
 REGOLE: NON inventare dati. Cita file e colonne. Chiudi con AZIONI SUGGERITE.
@@ -115,7 +141,7 @@ export default async (req) => {
 
     if (filesToRead.length > 0) {
       const results = await Promise.all(
-        filesToRead.map(f => readBridge(f.id, f.max).then(data => `\n--- FILE: ${f.label} ---\n${data}`))
+        filesToRead.map(f => readBridge(f.id, f.max, null, f.name).then(data => `\n--- FILE: ${f.label}${f.name ? " (filtro: "+f.name+")" : ""} ---\n${data}`))
       );
       dataContext = results.join("\n");
     }
