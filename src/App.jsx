@@ -16,8 +16,11 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [loadingMsg, setLoadingMsg] = useState("")
   const [error, setError] = useState(null)
+  const [listening, setListening] = useState(false)
+  const [speaking, setSpeaking] = useState(false)
   const chatRef = useRef(null)
   const inputRef = useRef(null)
+  const recognitionRef = useRef(null)
 
   useEffect(() => {
     if (chatRef.current) {
@@ -30,6 +33,69 @@ export default function App() {
     fetch("https://dilettaromana-unicallmapper.hf.space/api/gpt/bridge?action=list_folders")
       .catch(() => {})
   }, [])
+
+  // Setup Speech Recognition
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (SR) {
+      const recognition = new SR()
+      recognition.lang = "it-IT"
+      recognition.continuous = false
+      recognition.interimResults = true
+      recognition.onresult = (e) => {
+        const transcript = Array.from(e.results).map(r => r[0].transcript).join("")
+        setInput(transcript)
+        if (e.results[0].isFinal) {
+          setListening(false)
+        }
+      }
+      recognition.onerror = () => setListening(false)
+      recognition.onend = () => setListening(false)
+      recognitionRef.current = recognition
+    }
+  }, [])
+
+  function toggleListening() {
+    if (listening) {
+      recognitionRef.current?.stop()
+      setListening(false)
+    } else if (recognitionRef.current) {
+      setInput("")
+      recognitionRef.current.start()
+      setListening(true)
+    }
+  }
+
+  function speakText(text) {
+    if (speaking) {
+      window.speechSynthesis.cancel()
+      setSpeaking(false)
+      return
+    }
+    // Pulisci markdown dal testo
+    const clean = text
+      .replace(/#{1,6}\s/g, "")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/\*([^*]+)\*/g, "$1")
+      .replace(/`[^`]+`/g, "")
+      .replace(/\|[^\n]+\|/g, "")
+      .replace(/---+/g, "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/[#>*_~`|]/g, "")
+      .trim()
+    const utterance = new SpeechSynthesisUtterance(clean)
+    utterance.lang = "it-IT"
+    utterance.rate = 1.0
+    utterance.pitch = 1.0
+    // Cerca una voce italiana
+    const voices = window.speechSynthesis.getVoices()
+    const itVoice = voices.find(v => v.lang.startsWith("it"))
+    if (itVoice) utterance.voice = itVoice
+    utterance.onend = () => setSpeaking(false)
+    utterance.onerror = () => setSpeaking(false)
+    setSpeaking(true)
+    window.speechSynthesis.speak(utterance)
+  }
 
   async function sendMessage(text) {
     if (!text.trim() || loading) return
@@ -192,9 +258,28 @@ export default function App() {
               ) : (
                 <div>{msg.content}</div>
               )}
-              {msg.usage && (
+              {msg.role === "assistant" && (
+                <div style={styles.msgActions}>
+                  <button onClick={() => speakText(msg.content)} style={styles.speakBtn}
+                    title={speaking ? "Ferma lettura" : "Ascolta risposta"}>
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                      {speaking
+                        ? <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+                        : <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+                      }
+                    </svg>
+                    <span style={{fontSize:"10px",marginLeft:"4px"}}>{speaking ? "Stop" : "Ascolta"}</span>
+                  </button>
+                  {msg.usage && (
+                    <span style={styles.usageInline}>
+                      {msg.model?.replace("claude-sonnet-4-20250514","Sonnet")} | {msg.usage.input_tokens + msg.usage.output_tokens} tok
+                    </span>
+                  )}
+                </div>
+              )}
+              {msg.role === "user" && msg.usage && (
                 <div style={styles.usage}>
-                  {msg.model} | {msg.usage.input_tokens + msg.usage.output_tokens} tokens
+                  {msg.usage.input_tokens + msg.usage.output_tokens} tokens
                 </div>
               )}
             </div>
@@ -241,10 +326,25 @@ export default function App() {
             type="text"
             value={input}
             onChange={e => setInput(e.target.value)}
-            placeholder="Scrivi una domanda sui dati UNICAM..."
-            style={styles.input}
+            placeholder={listening ? "Sto ascoltando..." : "Scrivi o parla..."}
+            style={{...styles.input, ...(listening ? {borderColor: "#EF4444", boxShadow: "0 0 0 2px rgba(239,68,68,0.2)"} : {})}}
             disabled={loading}
           />
+          {/* Mic button */}
+          <button type="button" onClick={toggleListening} disabled={loading} style={{
+            ...styles.micBtn,
+            background: listening ? "linear-gradient(135deg, #EF4444, #DC2626)" : "linear-gradient(135deg, #6B7280, #4B5563)",
+            opacity: loading ? 0.5 : 1,
+            animation: listening ? "pulse-mic 1.5s infinite" : "none"
+          }} title={listening ? "Ferma registrazione" : "Parla"}>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="#fff">
+              {listening
+                ? <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+                : <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>
+              }
+            </svg>
+          </button>
+          {/* Send button */}
           <button type="submit" disabled={loading || !input.trim()} style={{
             ...styles.sendBtn,
             opacity: loading || !input.trim() ? 0.5 : 1
@@ -263,6 +363,7 @@ export default function App() {
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; }
         @keyframes blink { 0%,100%{opacity:.3} 50%{opacity:1} }
+        @keyframes pulse-mic { 0%{box-shadow:0 0 0 0 rgba(239,68,68,0.4)} 70%{box-shadow:0 0 0 10px rgba(239,68,68,0)} 100%{box-shadow:0 0 0 0 rgba(239,68,68,0)} }
         .markdown-body h1,.markdown-body h2,.markdown-body h3 { color: #1B3A5C; margin: 12px 0 6px; }
         .markdown-body p { margin: 4px 0; line-height: 1.6; }
         .markdown-body ul,.markdown-body ol { padding-left: 20px; margin: 4px 0; }
@@ -370,6 +471,25 @@ const styles = {
     background: "linear-gradient(135deg, #1B3A5C, #2E75B6)",
     border: "none", cursor: "pointer", display: "flex",
     alignItems: "center", justifyContent: "center", transition: "all .15s"
+  },
+  micBtn: {
+    width: "44px", height: "44px", borderRadius: "50%",
+    border: "none", cursor: "pointer", display: "flex",
+    alignItems: "center", justifyContent: "center", transition: "all .15s",
+    flexShrink: 0
+  },
+  msgActions: {
+    display: "flex", alignItems: "center", gap: "8px", marginTop: "6px",
+    paddingTop: "6px", borderTop: "1px solid #f0f0f0"
+  },
+  speakBtn: {
+    display: "flex", alignItems: "center", gap: "2px",
+    background: "none", border: "1px solid #d0d5dd", borderRadius: "14px",
+    padding: "3px 10px", cursor: "pointer", color: "#666",
+    fontSize: "11px", transition: "all .15s"
+  },
+  usageInline: {
+    fontSize: "10px", color: "#999"
   },
   disclaimer: {
     fontSize: "10px", color: "#999", textAlign: "center", marginTop: "8px"
