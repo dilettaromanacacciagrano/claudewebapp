@@ -14,6 +14,7 @@ export default function App() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
+  const [loadingMsg, setLoadingMsg] = useState("")
   const [error, setError] = useState(null)
   const chatRef = useRef(null)
   const inputRef = useRef(null)
@@ -24,6 +25,12 @@ export default function App() {
     }
   }, [messages, loading])
 
+  // Pre-warm HF Space al caricamento (lo sveglia se in standby)
+  useEffect(() => {
+    fetch("https://dilettaromana-unicallmapper.hf.space/api/gpt/bridge?action=list_folders")
+      .catch(() => {})
+  }, [])
+
   async function sendMessage(text) {
     if (!text.trim() || loading) return
     setError(null)
@@ -33,23 +40,58 @@ export default function App() {
     setMessages(newMessages)
     setInput("")
     setLoading(true)
+    setLoadingMsg("Analizzo la richiesta...")
 
     try {
-      // Build conversation for API (only role + content)
       const apiMessages = newMessages.map(m => ({
         role: m.role === "assistant" ? "assistant" : "user",
         content: m.content
       }))
 
-      const resp = await fetch("/api/claude-chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: apiMessages })
-      })
+      const payload = JSON.stringify({ messages: apiMessages })
+
+      // Funzione fetch con timeout 55 secondi
+      async function callAPI() {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 55000)
+        const resp = await fetch("/api/claude-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+          signal: controller.signal
+        })
+        clearTimeout(timer)
+        return resp
+      }
+
+      // Primo tentativo
+      let resp
+      try {
+        resp = await callAPI()
+      } catch (e1) {
+        // Se timeout o errore di rete, riprova una volta (lo Space HF potrebbe essere in standby)
+        setLoadingMsg("Il servizio si sta avviando... Riprovo automaticamente...")
+        try {
+          resp = await callAPI()
+        } catch (e2) {
+          throw new Error("Il servizio non risponde. Riprova tra qualche secondo.")
+        }
+      }
 
       if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: "Errore di rete" }))
-        throw new Error(err.error || err.details || `HTTP ${resp.status}`)
+        if (resp.status === 504) {
+          // Timeout Netlify — riprova
+          setLoadingMsg("Timeout, riprovo...")
+          try {
+            resp = await callAPI()
+          } catch (e3) {
+            throw new Error("L'analisi richiede troppo tempo. Prova con una domanda piu' semplice.")
+          }
+          if (!resp.ok) throw new Error("L'analisi richiede troppo tempo. Prova con una domanda piu' semplice.")
+        } else {
+          const err = await resp.json().catch(() => ({ error: "Errore server" }))
+          throw new Error(err.error || err.details || `Errore HTTP ${resp.status}`)
+        }
       }
 
       const data = await resp.json()
@@ -63,6 +105,7 @@ export default function App() {
       setError(e.message)
     } finally {
       setLoading(false)
+      setLoadingMsg("")
       inputRef.current?.focus()
     }
   }
@@ -177,7 +220,7 @@ export default function App() {
                 <span style={{...styles.dot, animationDelay: "0s"}}></span>
                 <span style={{...styles.dot, animationDelay: "0.2s"}}></span>
                 <span style={{...styles.dot, animationDelay: "0.4s"}}></span>
-                <span style={styles.typingText}>Sto analizzando i dati su Google Drive...</span>
+                <span style={styles.typingText}>{loadingMsg || "Sto analizzando i dati su Google Drive..."}</span>
               </div>
             </div>
           </div>
