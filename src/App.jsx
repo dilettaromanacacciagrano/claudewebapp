@@ -5,7 +5,7 @@ const SUGGESTIONS = [
   "Mostrami il menu completo delle analisi disponibili",
   "Chi lavora su machine learning?",
   "Quali call scadono nei prossimi 30 giorni?",
-  "Profilo completo di Michele Loreti",
+  "Competenze scoperte: call senza candidati",
   "Genera un report completo: panoramica, urgenze, gap e azioni",
   "Analisi per la Scuola di Architettura e Design",
 ]
